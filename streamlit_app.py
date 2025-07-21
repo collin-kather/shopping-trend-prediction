@@ -1,12 +1,9 @@
-
 import streamlit as st
 import pandas as pd
 import os
 import random
-import time
-from sklearn.ensemble import RandomForestClassifier
-from datetime import datetime
 import uuid
+from sklearn.ensemble import RandomForestClassifier
 
 # ---------- CONFIG ----------
 IMAGE_FOLDER = "images"
@@ -100,8 +97,8 @@ if st.session_state.last_result and st.session_state.trial_index >= TRAIN_AFTER:
         st.image(f"{IMAGE_FOLDER}/{st.session_state.last_result['predicted']}", width=200)
         st.markdown(f"**Confidence:** `{st.session_state.last_result['confidence']:.2f}`")
         st.markdown("**Rationale:**")
-        st.markdown("- Based on color, cartoon, or branding pattern")
-        st.markdown("- Trained from your prior preferences")
+        st.markdown("- Based on color, cartoon, and branding features extracted from the image")
+        st.markdown("- Trained on your earlier preferences over past trials")
 
 # ---------- MAIN TRIAL ----------
 if st.session_state.trial_index < NUM_TRIALS:
