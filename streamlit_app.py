@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import os
@@ -18,7 +19,10 @@ ITEMS_PER_TRIAL = 5
 @st.cache_data
 def load_features():
     df = pd.read_csv(CSV_FEATURES)
-    df["index"] = df["image"].apply(lambda x: int(os.path.splitext(x)[0]))
+    df = df[df["image"].notna()]
+    df["index"] = df["image"].apply(lambda x: int(os.path.splitext(str(x))[0]) if str(x).endswith(".jpg") and str(x)[:-4].isdigit() else None)
+    df = df.dropna(subset=["index"])
+    df["index"] = df["index"].astype(int)
     return df
 
 feature_df = load_features()
@@ -96,15 +100,12 @@ if st.session_state.last_result and st.session_state.trial_index >= TRAIN_AFTER:
         st.image(f"{IMAGE_FOLDER}/{st.session_state.last_result['chosen']}", width=200)
     with col2:
         st.markdown("#### 🤖 We Predicted")
-        predicted_path = f"{IMAGE_FOLDER}/{st.session_state.last_result['predicted']}"
-        if st.session_state.last_result["predicted"] and os.path.exists(predicted_path):
-            st.image(predicted_path, width=200)
-            st.markdown(f"**Confidence:** `{st.session_state.last_result['confidence']:.2f}`")
-            st.markdown("**Rationale:**")
-            st.markdown("- Based on color, cartoon, or branding pattern")
-            st.markdown("- Trained from your prior preferences")
-        else:
-            st.warning("Prediction not available or image not found.")
+        if st.session_state.last_result['predicted']:
+            st.image(f"{IMAGE_FOLDER}/{st.session_state.last_result['predicted']}", width=200)
+        st.markdown(f"**Confidence:** `{st.session_state.last_result['confidence']:.2f}`")
+        st.markdown("**Rationale:**")
+        st.markdown("- Based on color, cartoon, or branding pattern")
+        st.markdown("- Trained from your prior preferences")
 
 # ---------- MAIN TRIAL ----------
 if st.session_state.trial_index < NUM_TRIALS:
