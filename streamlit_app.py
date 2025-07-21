@@ -39,6 +39,9 @@ def get_all_images():
 
 def get_trial_images():
     all_images = get_all_images()
+    if len(all_images) < ITEMS_PER_TRIAL:
+        st.error(f"❌ Not enough images. You need at least {ITEMS_PER_TRIAL}, but found {len(all_images)}.")
+        st.stop()
     return random.sample(all_images, ITEMS_PER_TRIAL)
 
 # ---------- ML Training ----------
@@ -96,13 +99,17 @@ if st.session_state.trial_index < NUM_TRIALS:
     selected = None
     for i, img in enumerate(st.session_state.current_images):
         with cols[i % 5]:
-            st.image(f"{IMAGE_FOLDER}/{img}", use_column_width=True)
+            st.image(f"{IMAGE_FOLDER}/{img}", use_container_width=True)
             if st.button("Choose", key=f"choose_{i}"):
                 selected = img
 
-    # Handle selection or timeout
+    # Handle timeout or user choice
     if remaining_time <= 0 or selected:
-        selection = selected if selected else None
+        if remaining_time <= 0:
+            selection = None
+        else:
+            selection = selected
+
         response_time = round(time.time() - st.session_state.start_time, 2)
 
         st.session_state.choices.append({
