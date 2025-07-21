@@ -1,55 +1,52 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import random, time, os, uuid, pandas as pd
 from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────────
-NUM_TRIALS       = 40         # total rounds
-TRAIN_AFTER      = 30         # first 30 rounds = training phase
-ITEMS_PER_TRIAL  = 5          # images per shelf row
-TOTAL_TIME_LIMIT = 120        # 2-min budget for training phase
-IMAGE_FOLDER     = "images"   # put 1.jpg … n.jpg here
+NUM_TRIALS       = 40
+TRAIN_AFTER      = 30
+ITEMS_PER_TRIAL  = 5
+TOTAL_TIME_LIMIT = 120      # two-minute budget for first 30 rounds
+IMAGE_FOLDER     = "images"
 OUTPUT_DIR       = "responses"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ── UTILITIES ───────────────────────────────────────────────────────────────────
-def idx(name):  # extract numeric index from filename
-    return int(os.path.splitext(name)[0]) if name.split(".")[0].isdigit() else -1
+# ── HELPER FUNCTIONS ────────────────────────────────────────────────────────────
+extract = lambda f: int(os.path.splitext(f)[0]) if f.split(".")[0].isdigit() else -1
+all_imgs = lambda: sorted([f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(".jpg")], key=extract)
 
-get_all_images  = lambda: sorted(
-    [f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(".jpg")], key=idx
-)
-def get_trial_images():
-    pool = get_all_images()
+def trial_images():
+    pool = all_imgs()
     if len(pool) < ITEMS_PER_TRIAL:
-        st.error(f"Need ≥{ITEMS_PER_TRIAL} JPG files in “{IMAGE_FOLDER}/”.")
+        st.error(f"Need ≥{ITEMS_PER_TRIAL} images in `{IMAGE_FOLDER}/`.")
         st.stop()
     return random.sample(pool, ITEMS_PER_TRIAL)
 
-def train(records):
-    rows = [{"index": idx(opt), "chosen": int(opt == r["selection"])}
-            for r in records for opt in r["options"]]
+def train_model(picks):
+    rows = [{"idx": extract(opt), "ch": int(opt == r["sel"])}
+            for r in picks for opt in r["opts"]]
     df = pd.DataFrame(rows)
-    if df["chosen"].sum() == 0:
+    if df["ch"].sum() == 0:  # no positive labels yet
         return None
-    m = RandomForestClassifier(n_estimators=100)
-    m.fit(df[["index"]], df["chosen"])
-    return m
+    clf = RandomForestClassifier(n_estimators=100)
+    clf.fit(df[["idx"]], df["ch"])
+    return clf
 
-def predict(m, opts):
-    df = pd.DataFrame({"index": [idx(o) for o in opts]})
-    p  = m.predict_proba(df)[:, 1]
-    best = p.argmax()
-    return opts[best], p[best]
+def predict(clf, opts):
+    df = pd.DataFrame({"idx": [extract(o) for o in opts]})
+    probs = clf.predict_proba(df)[:, 1]
+    best  = probs.argmax()
+    return opts[best], probs[best]
 
-# ── STYLING ─────────────────────────────────────────────────────────────────────
+# ── GLOBAL CSS ──────────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide")
 st.markdown(
     """
     <style>
       html,body,[class*="css"]{background:#000!important;color:#00ff00!important;
           font-family:"Courier New",monospace;}
-      .timer  {font-size:22px;font-weight:bold;margin:6px 0;}
       img.neon{border:2px dashed #00ff00;border-radius:4px;background:#111;padding:3px;}
       button  {background:#000;border:1px solid #00ff00!important;color:#00ff00!important}
       button:hover{background:#00ff00;color:#000!important}
@@ -59,114 +56,97 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── STATE INIT ──────────────────────────────────────────────────────────────────
+# ── SESSION STATE ───────────────────────────────────────────────────────────────
 if "step" not in st.session_state:
     st.session_state.update(
-        step=0,               # current trial index (0-based)
-        picks=[],             # list of dicts
-        uid=str(uuid.uuid4())[:8],
-        t0=None,              # timer start
-        shelf=[],             # current 5 images
-        model=None, model_ok=False,
-        last_tick=-1,         # for 1-s refresh
-        last_res=None         # (chosen, pred, conf)
-)
+        step=0, picks=[], shelf=[],  uid=str(uuid.uuid4())[:8],
+        start=None, model=None, model_ready=False, last_res=None
+    )
 
-# ── INTRO / START ───────────────────────────────────────────────────────────────
+# ── AUTO-REFRESH (1 s) ─────────────────────────────────────────────────────────
+st_autorefresh(interval=1_000, limit=None, key="timer-tick")
+
+# ── HEADER + SIDEBAR TIMER ─────────────────────────────────────────────────────
 st.title("💾  90s Grocery-Shelf AI Simulator")
 
-if st.session_state.t0 is None:
+if st.session_state.start is None:
     st.write(
-        "You’ll make **30 speedy picks** (max 2 min). "
-        "After that the 90s AI will try to guess your next 10 choices."
+        "Pick **30 items** (within 2 minutes) to teach the retro AI. "
+        "Then it will try to predict your next 10 choices."
     )
     if st.button("🚀  Begin"):
-        st.session_state.t0 = time.time()
-        st.rerun()
+        st.session_state.start = time.time()
+        st.experimental_rerun()
     st.stop()
 
-# ── LIVE TIMER ─────────────────────────────────────────────────────────────────
-elapsed   = int(time.time() - st.session_state.t0)
-left      = max(TOTAL_TIME_LIMIT - elapsed, 0)
-if st.session_state.step < TRAIN_AFTER:
-    st.markdown(f"<div class='timer'>⏳ {left} s left in training phase</div>",
-                unsafe_allow_html=True)
+elapsed   = int(time.time() - st.session_state.start)
+remaining = max(TOTAL_TIME_LIMIT - elapsed, 0)
+phase_txt = f"{remaining}s left in training phase" if st.session_state.step < TRAIN_AFTER else "Prediction phase"
+st.sidebar.markdown(f"## ⏳ {phase_txt}")
 
-# Auto-refresh exactly once per second
-now = int(time.time())
-if now != st.session_state.last_tick:
-    st.session_state.last_tick = now
-    st.rerun()
-
-# ── MAIN TRIAL LOOP ────────────────────────────────────────────────────────────
+# ── MAIN LOOP ───────────────────────────────────────────────────────────────────
 if st.session_state.step < NUM_TRIALS:
     n = st.session_state.step + 1
     st.subheader(f"Trial {n} / {NUM_TRIALS}")
 
-    # prepare shelf
+    # prepare shelf if empty
     if not st.session_state.shelf:
-        st.session_state.shelf = get_trial_images()
+        st.session_state.shelf = trial_images()
 
-    # prediction (only after 30 rounds)
+    # prediction (post-training)
     pred, conf = None, None
     if n > TRAIN_AFTER:
-        if not st.session_state.model_ok:
-            st.session_state.model = train(st.session_state.picks)
-            st.session_state.model_ok = True
+        if not st.session_state.model_ready:
+            st.session_state.model = train_model(st.session_state.picks)
+            st.session_state.model_ready = True
         if st.session_state.model:
             pred, conf = predict(st.session_state.model, st.session_state.shelf)
 
-    # show 5 products
-    cols = st.columns(ITEMS_PER_TRIAL)
-    choice = None
-    for col, img in zip(cols, st.session_state.shelf):
+    # display shelf row
+    chosen = None
+    for col, img in zip(st.columns(ITEMS_PER_TRIAL), st.session_state.shelf):
         with col:
-            st.image(f"{IMAGE_FOLDER}/{img}", use_column_width=True, caption=None,
-                     output_format="JPEG", clamp=True, channels="RGB", class_="neon")
+            st.image(f"{IMAGE_FOLDER}/{img}", class_="neon", use_container_width=True)
             if st.button("Choose", key=f"{n}_{img}"):
-                choice = img
+                chosen = img
 
-    # record on click or if training timer expires with no click
-    if choice or (st.session_state.step < TRAIN_AFTER and left == 0):
+    # record on click or timeout (during training)
+    if chosen or (st.session_state.step < TRAIN_AFTER and remaining == 0):
         st.session_state.picks.append(
-            dict(trial=n, options=st.session_state.shelf,
-                 selection=choice, predicted=pred,
-                 t_ms=int((time.time()-st.session_state.t0)*1000),
+            dict(trial=n, opts=st.session_state.shelf, sel=chosen,
+                 pred=pred, ms=int((time.time()-st.session_state.start)*1000),
                  ts=datetime.utcnow().isoformat(), uid=st.session_state.uid)
         )
-        st.session_state.last_res = (choice, pred, conf)  # for later display
+        st.session_state.last_res = (chosen, pred, conf)  # save for display
         st.session_state.step    += 1
         st.session_state.shelf    = []
-        st.rerun()
+        st.experimental_rerun()
 
-    # show result ONLY after training phase
-    if n > TRAIN_AFTER and choice and pred:
+    # result panel (only once predictions start)
+    if n > TRAIN_AFTER and chosen and pred:
         ch, pr, cf = st.session_state.last_res
         st.markdown("---")
         colA, colB = st.columns(2)
         with colA:
             st.markdown("### You chose:")
-            st.image(f"{IMAGE_FOLDER}/{ch}", use_column_width=True, class_="neon")
+            st.image(f"{IMAGE_FOLDER}/{ch}", class_="neon", use_container_width=True)
         with colB:
             st.markdown("### AI predicted:")
-            st.image(f"{IMAGE_FOLDER}/{pr}", caption=f"Conf {cf:.2f}",
-                     use_column_width=True, class_="neon")
+            st.image(f"{IMAGE_FOLDER}/{pr}", caption=f"Confidence {cf:.2f}", class_="neon",
+                     use_container_width=True)
             st.markdown(
-                "<div class='neonbox'>"
-                "<u>Why?</u><br/>"
-                "• Based on your earlier picks.<br/>"
-                "• Close index similarity.<br/>"
+                "<div class='neonbox'><u>Why?</u><br>"
+                "• Learned from your first 30 picks.<br>"
+                "• Chose item with highest similarity index.<br>"
                 "</div>",
                 unsafe_allow_html=True,
             )
 
-# ── FINISH ─────────────────────────────────────────────────────────────────────
+# ── DONE ────────────────────────────────────────────────────────────────────────
 else:
     st.success("Simulation complete – download your data!")
     df = pd.DataFrame(st.session_state.picks)
-    df["correct"] = df["selection"] == df["predicted"]
-    file = f"{OUTPUT_DIR}/choices_{st.session_state.uid}.csv"
-    df.to_csv(file, index=False)
+    df["correct"] = df["sel"] == df["pred"]
+    csv = df.to_csv(index=False)
+    st.download_button("📥  CSV", csv, "choices.csv", "text/csv")
     st.dataframe(df)
-    st.download_button("📥 CSV", df.to_csv(index=False),
-                       file_name="choices.csv", mime="text/csv")
