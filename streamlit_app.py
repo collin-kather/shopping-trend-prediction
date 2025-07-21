@@ -172,9 +172,9 @@ if st.session_state.trial_index < NUM_TRIALS:
         st.session_state.last_result = (final_selection, predicted_img, pred_score)
         st.session_state.trial_index += 1
         st.session_state.refresh_images = True
-        st.experimental_rerun()
+        st.rerun()
     else:
-        st.experimental_rerun()
+        st.rerun()
 
 # ---------- END ----------
 else:
