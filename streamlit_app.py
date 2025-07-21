@@ -1,126 +1,167 @@
-import streamlit as st, random, time, os, uuid, pandas as pd
+import streamlit as st
+import random
+import time
+import pandas as pd
 from datetime import datetime
+import uuid
+import os
 from sklearn.ensemble import RandomForestClassifier
 
-# ── CONFIG ──────────────────────────────────────────────────────────────────────
-TOTAL_ROUNDS      = 40
-TRAIN_ROUNDS      = 30          # first 30 = training
-OPTIONS_PER_ROUND = 5
-TRAIN_DEADLINE    = 120         # seconds to finish first 30 (soft limit)
-IMG_FOLDER        = "images"
-OUT_FOLDER        = "responses"
-os.makedirs(OUT_FOLDER, exist_ok=True)
+# ---------- CONFIG ----------
+NUM_TRIALS = 40
+TRAIN_AFTER = 30
+ITEMS_PER_TRIAL = 5  # one row of 5
+TIME_LIMIT = 10
+IMAGE_FOLDER = "images"
+OUTPUT_DIR = "responses"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ── UTILITIES ───────────────────────────────────────────────────────────────────
-def idx(fname):          # numeric part of “123.jpg”
-    return int(os.path.splitext(fname)[0]) if fname.split(".")[0].isdigit() else -1
+# ---------- FEATURE ----------
+def extract_index(filename):
+    try:
+        return int(os.path.splitext(filename)[0])
+    except:
+        return -1
 
-def pool():
-    return sorted([f for f in os.listdir(IMG_FOLDER) if f.lower().endswith(".jpg")], key=idx)
+# ---------- SESSION ----------
+if "trial_index" not in st.session_state:
+    st.session_state.trial_index = 0
+    st.session_state.choices = []
+    st.session_state.user_id = str(uuid.uuid4())[:8]
+    st.session_state.refresh_images = True
+    st.session_state.model_trained = False
+    st.session_state.last_result = None
+    st.session_state.timer_started = time.time()
 
-def new_shelf():
-    all_imgs = pool()
-    if len(all_imgs) < OPTIONS_PER_ROUND:
-        st.error(f"Need ≥{OPTIONS_PER_ROUND} .jpg files in `{IMG_FOLDER}/`"); st.stop()
-    return random.sample(all_imgs, OPTIONS_PER_ROUND)
+# ---------- IMAGE UTILS ----------
+def get_all_images():
+    return sorted([f for f in os.listdir(IMAGE_FOLDER) if f.endswith(".jpg")], key=extract_index)
 
-def train_model(records):
-    rows = [{"i": idx(opt), "y": int(opt == r["sel"])}
-            for r in records for opt in r["opts"]]
-    df = pd.DataFrame(rows)
-    if df["y"].sum() == 0: return None
-    clf = RandomForestClassifier(n_estimators=100); clf.fit(df[["i"]], df["y"]); return clf
+def get_trial_images():
+    all_images = get_all_images()
+    if len(all_images) < ITEMS_PER_TRIAL:
+        st.error(f"❌ Not enough images! Found {len(all_images)} but need at least {ITEMS_PER_TRIAL}.")
+        st.stop()
+    return random.sample(all_images, ITEMS_PER_TRIAL)
 
-def predict(clf, opts):
-    import numpy as np
-    probs = clf.predict_proba(pd.DataFrame({"i": [idx(o) for o in opts]}))[:, 1]
-    best  = int(np.argmax(probs))
-    return opts[best], probs[best]
+# ---------- ML UTILS ----------
+def train_model(data):
+    records = []
+    for trial in data:
+        for img in trial["options"]:
+            records.append({
+                "index": extract_index(img),
+                "chosen": int(img == trial["selection"])
+            })
+    df = pd.DataFrame(records)
+    if df["chosen"].sum() == 0:
+        return None
+    model = RandomForestClassifier(n_estimators=100)
+    model.fit(df[["index"]], df["chosen"])
+    return model
 
-# ── UI + STATE ──────────────────────────────────────────────────────────────────
+def predict_choice(model, image_list):
+    df = pd.DataFrame({"index": [extract_index(f) for f in image_list]})
+    preds = model.predict_proba(df)[:, 1]
+    best_idx = preds.argmax()
+    return image_list[best_idx], preds[best_idx]
+
+# ---------- STYLING ----------
 st.set_page_config(layout="wide")
-st.title("🛒 Minimal Grocery-Shelf AI Demo")
+st.markdown("""
+    <style>
+    .retail-card {
+        border: 2px solid #e0e0e0;
+        border-radius: 12px;
+        padding: 10px;
+        margin-bottom: 8px;
+        text-align: center;
+        background-color: #fdfdfd;
+        box-shadow: 1px 1px 5px rgba(0,0,0,0.05);
+    }
+    .timer {
+        font-size: 20px;
+        font-weight: bold;
+        color: #aa4400;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-if "state" not in st.session_state:
-    st.session_state.state  = "intro"
-    st.session_state.step   = 0
-    st.session_state.log    = []
-    st.session_state.shelf  = []
-    st.session_state.uid    = uuid.uuid4().hex[:8]
-    st.session_state.start  = None
-    st.session_state.model  = None
-    st.session_state.ready  = False
-    st.session_state.last   = None
+# ---------- HEADER ----------
+st.title("🛒 Grocery Shelf Selection Game")
 
-# ---------- INTRO ----------
-if st.session_state.state == "intro":
-    st.write(
-        f"Pick **{TRAIN_ROUNDS} items** (try to stay under 2 min). "
-        "After that the AI will predict your next choices."
-    )
-    if st.button("Start"):
-        st.session_state.state  = "game"
-        st.session_state.start  = time.time()
-        st.experimental_rerun()
-    st.stop()
+# ---------- DISPLAY LAST RESULT ----------
+if st.session_state.last_result:
+    chosen, predicted, confidence = st.session_state.last_result
+    col1, col2 = st.columns(2)
+    with col1:
+        st.success(f"🛍️ You chose: **{chosen or 'None'}**")
+    with col2:
+        st.info(f"🤖 Predicted: **{predicted}** (Confidence: `{confidence:.2f}`)")
 
-# ---------- TIMER / STATUS ----------
-elapsed = int(time.time() - st.session_state.start)
-time_left = max(TRAIN_DEADLINE - elapsed, 0)
-phase = "Training" if st.session_state.step < TRAIN_ROUNDS else "Prediction"
-st.write(f"⏱ **{phase} phase** – {time_left}s left (soft limit)")
+# ---------- MAIN TRIAL ----------
+if st.session_state.trial_index < NUM_TRIALS:
+    trial_num = st.session_state.trial_index + 1
+    st.markdown(f"### Trial {trial_num} of {NUM_TRIALS}")
 
-# ---------- GAME LOOP ----------
-if st.session_state.step < TOTAL_ROUNDS:
+    # TIMER logic
+    elapsed = int(time.time() - st.session_state.timer_started)
+    remaining_time = max(TIME_LIMIT - elapsed, 0)
+    st.markdown(f"⏳ <span class='timer'>Time left: {remaining_time} seconds</span>", unsafe_allow_html=True)
 
-    round_no = st.session_state.step + 1
-    st.subheader(f"Round {round_no} / {TOTAL_ROUNDS}")
+    # Get images
+    if st.session_state.refresh_images:
+        st.session_state.current_images = get_trial_images()
+        st.session_state.refresh_images = False
+        st.session_state.timer_started = time.time()
 
-    # load shelf once
-    if not st.session_state.shelf:
-        st.session_state.shelf = new_shelf()
-
-    # maybe produce a prediction
-    pred_img, conf = None, None
-    if round_no > TRAIN_ROUNDS:
-        if not st.session_state.ready:
-            st.session_state.model = train_model(st.session_state.log)
-            st.session_state.ready = True
+    # ML model
+    predicted_img, pred_score = None, None
+    if trial_num > TRAIN_AFTER:
+        if not st.session_state.model_trained:
+            st.session_state.model = train_model(st.session_state.choices)
+            st.session_state.model_trained = True
         if st.session_state.model:
-            pred_img, conf = predict(st.session_state.model, st.session_state.shelf)
+            predicted_img, pred_score = predict_choice(st.session_state.model, st.session_state.current_images)
 
-    # display 5 options
-    choice = None
-    for col, img in zip(st.columns(OPTIONS_PER_ROUND), st.session_state.shelf):
-        with col:
-            st.image(f"{IMG_FOLDER}/{img}", width=180)
-            if st.button("Choose", key=f"{round_no}_{img}"):
-                choice = img
+    # Display images in one row
+    cols = st.columns(ITEMS_PER_TRIAL)
+    selected = None
+    for i, img in enumerate(st.session_state.current_images):
+        with cols[i]:
+            st.markdown(f"<div class='retail-card'>", unsafe_allow_html=True)
+            st.image(f"{IMAGE_FOLDER}/{img}", use_container_width=True)
+            if st.button("Choose", key=f"choose_{i}"):
+                selected = img
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    # record click (or skip if deadline passed)
-    if choice or (st.session_state.step < TRAIN_ROUNDS and time_left == 0):
-        st.session_state.log.append(
-            dict(r=round_no, opts=st.session_state.shelf,
-                 sel=choice, pred=pred_img, conf=conf,
-                 ts=datetime.utcnow().isoformat())
-        )
-        st.session_state.last  = (choice, pred_img, conf)
-        st.session_state.step += 1
-        st.session_state.shelf = []
+    # Handle timeout or selection
+    if remaining_time <= 0 or selected:
+        final_selection = selected if selected else None
+        st.session_state.choices.append({
+            "trial": trial_num,
+            "options": st.session_state.current_images,
+            "selection": final_selection,
+            "predicted": predicted_img,
+            "response_time": elapsed,
+            "timestamp": datetime.utcnow().isoformat(),
+            "user_id": st.session_state.user_id
+        })
+
+        st.session_state.last_result = (final_selection, predicted_img, pred_score)
+        st.session_state.trial_index += 1
+        st.session_state.refresh_images = True
+        st.experimental_rerun()
+    else:
+        # Refresh every second to update timer
         st.experimental_rerun()
 
-    # show immediate result only in prediction phase
-    if round_no > TRAIN_ROUNDS and choice and pred_img:
-        ch, pr, cf = st.session_state.last
-        st.markdown("**You picked:**")
-        st.image(f"{IMG_FOLDER}/{ch}", width=150)
-        st.markdown("**AI guessed:**")
-        st.image(f"{IMG_FOLDER}/{pr}", caption=f"Conf {cf:.2f}", width=150)
-
-# ---------- DONE ----------
+# ---------- END ----------
 else:
-    st.success("All rounds complete!")
-    df = pd.DataFrame(st.session_state.log)
-    df["correct"] = df["sel"] == df["pred"]
-    st.download_button("📥 Download CSV", df.to_csv(index=False), "choices.csv", "text/csv")
+    st.success("✅ You're done! Here are your results:")
+    df = pd.DataFrame(st.session_state.choices)
+    df["correct_prediction"] = df["selection"] == df["predicted"]
+    filename = f"{OUTPUT_DIR}/results_{st.session_state.user_id}.csv"
+    df.to_csv(filename, index=False)
     st.dataframe(df)
+    st.download_button("Download Results CSV", data=df.to_csv(index=False), file_name="your_choices.csv", mime="text/csv")
