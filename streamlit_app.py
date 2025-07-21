@@ -1,195 +1,177 @@
 import streamlit as st
-import random
-import time
-import pandas as pd
+import random, time, os, uuid, pandas as pd
 from datetime import datetime
-import uuid
-import os
 from sklearn.ensemble import RandomForestClassifier
 
-# ---------- CONFIG ----------
-NUM_TRIALS = 40
-TRAIN_AFTER = 30
-ITEMS_PER_TRIAL = 5
-TOTAL_TIME_LIMIT = 120  # 2 minutes for first 30 rounds
-IMAGE_FOLDER = "images"
-OUTPUT_DIR = "responses"
+# ── CONFIG ──────────────────────────────────────────────────────────────────────
+NUM_TRIALS          = 40          # total rounds
+TRAIN_AFTER         = 30          # first 30 rounds = training phase
+ITEMS_PER_TRIAL     = 5           # one shelf row
+TOTAL_TIME_LIMIT    = 120         # 2-minute budget for training phase
+IMAGE_FOLDER        = "images"    # folder containing 1.jpg … n.jpg
+OUTPUT_DIR          = "responses"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ---------- UTILS ----------
-def extract_index(filename):
-    try:
-        return int(os.path.splitext(filename)[0])
-    except:
-        return -1
-
-def get_all_images():
-    return sorted([f for f in os.listdir(IMAGE_FOLDER) if f.endswith(".jpg")], key=extract_index)
+# ── HELPER FUNCTIONS ────────────────────────────────────────────────────────────
+extract_index = lambda f: int(os.path.splitext(f)[0]) if f.split(".")[0].isdigit() else -1
+get_all_images = lambda: sorted(
+    [f for f in os.listdir(IMAGE_FOLDER) if f.lower().endswith(".jpg")],
+    key=extract_index,
+)
 
 def get_trial_images():
-    all_images = get_all_images()
-    if len(all_images) < ITEMS_PER_TRIAL:
-        st.error(f"❌ Not enough images! Found {len(all_images)} but need at least {ITEMS_PER_TRIAL}.")
+    pool = get_all_images()
+    if len(pool) < ITEMS_PER_TRIAL:
+        st.error(f"Need ≥{ITEMS_PER_TRIAL} images in `{IMAGE_FOLDER}/`.")
         st.stop()
-    return random.sample(all_images, ITEMS_PER_TRIAL)
+    return random.sample(pool, ITEMS_PER_TRIAL)
 
-def train_model(data):
-    records = []
-    for trial in data:
-        for img in trial["options"]:
-            records.append({
-                "index": extract_index(img),
-                "chosen": int(img == trial["selection"])
-            })
-    df = pd.DataFrame(records)
+def train_model(records):
+    rows = [{"index": extract_index(i), "chosen": int(i == r["selection"])}
+            for r in records for i in r["options"]]
+    df = pd.DataFrame(rows)
     if df["chosen"].sum() == 0:
         return None
     model = RandomForestClassifier(n_estimators=100)
     model.fit(df[["index"]], df["chosen"])
     return model
 
-def predict_choice(model, image_list):
-    df = pd.DataFrame({"index": [extract_index(f) for f in image_list]})
-    preds = model.predict_proba(df)[:, 1]
-    best_idx = preds.argmax()
-    return image_list[best_idx], preds[best_idx]
+def predict_item(model, options):
+    df = pd.DataFrame({"index": [extract_index(i) for i in options]})
+    probs = model.predict_proba(df)[:, 1]
+    best = probs.argmax()
+    return options[best], probs[best]
 
-# ---------- STYLING ----------
+# ── PAGE STYLING ────────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide")
-st.markdown("""
+st.markdown(
+    """
     <style>
-    html, body, [class*="css"]  {
-        background-color: black !important;
-        color: #00FF00 !important;
-        font-family: 'Courier New', Courier, monospace;
-    }
-    .retail-card {
-        border: 2px dashed #00FF00;
-        border-radius: 10px;
-        padding: 10px;
-        margin-bottom: 10px;
-        background-color: #111;
-    }
-    .neon-box {
-        border: 1px solid #00FF00;
-        padding: 10px;
-        margin-top: 10px;
-        background-color: #000;
-        border-radius: 10px;
-    }
-    .timer {
-        font-size: 24px;
-        font-weight: bold;
-        color: #00FF00;
-        margin-bottom: 10px;
-    }
+      html, body, [class*="css"] {
+          background: #000 !important;
+          color: #00ff00 !important;
+          font-family: "Courier New", monospace;
+      }
+      .neon-box   {border:1px solid #00ff00;padding:10px;border-radius:4px;}
+      .card       {border:2px dashed #00ff00;border-radius:4px;padding:6px;margin:4px;background:#111;}
+      .timer      {font-size:22px;font-weight:bold;margin:4px 0;color:#00ff00;}
+      button      {background:#000;border:1px solid #00ff00 !important;color:#00ff00 !important;}
+      button:hover{background:#00ff00;color:#000 !important;}
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# ---------- SESSION INIT ----------
-if "trial_index" not in st.session_state:
-    st.session_state.trial_index = 0
-    st.session_state.choices = []
-    st.session_state.user_id = str(uuid.uuid4())[:8]
-    st.session_state.refresh_images = True
-    st.session_state.model_trained = False
-    st.session_state.last_result = None
-    st.session_state.timer_started = False
-    st.session_state.start_time = 0
+# ── SESSION STATE INIT ──────────────────────────────────────────────────────────
+if "idx" not in st.session_state:
+    st.session_state.idx           = 0               # current trial (0-based)
+    st.session_state.choices       = []              # list of dicts
+    st.session_state.uid           = str(uuid.uuid4())[:8]
+    st.session_state.timer_start   = None            # set on Begin
+    st.session_state.images        = []              # current 5 images
+    st.session_state.model         = None
+    st.session_state.model_ready   = False
+    st.session_state.last_tick_sec = -1              # for 1-s refresh
 
-# ---------- HEADER ----------
-st.title("💾 90s Grocery AI Simulator")
-st.markdown("Welcome to the **retro shelf selection challenge**. Choose one item per row. Let's see if the AI learns your taste...")
+# ── INTRO / START BUTTON ────────────────────────────────────────────────────────
+st.title("💾 90s Grocery-Shelf AI Simulator")
 
-# ---------- START BUTTON ----------
-if not st.session_state.timer_started:
-    if st.button("💾 Begin Simulation"):
-        st.session_state.timer_started = True
-        st.session_state.start_time = time.time()
+if st.session_state.timer_start is None:
+    st.markdown(
+        "Welcome to the **retro shelf challenge**. "
+        "You have **2 minutes** to pick 30 items. "
+        "Click **Begin** to start!"
+    )
+    if st.button("🚀 Begin"):
+        st.session_state.timer_start = time.time()
         st.rerun()
     st.stop()
 
-# ---------- MAIN GAME ----------
-elapsed = int(time.time() - st.session_state.start_time)
-time_remaining = max(TOTAL_TIME_LIMIT - elapsed, 0)
+# ── TIMER ───────────────────────────────────────────────────────────────────────
+elapsed   = int(time.time() - st.session_state.timer_start)
+time_left = max(TOTAL_TIME_LIMIT - elapsed, 0)
+if st.session_state.idx < TRAIN_AFTER:
+    st.markdown(f"<div class='timer'>⏳ Time left in training phase: {time_left} s</div>", unsafe_allow_html=True)
 
-if st.session_state.trial_index < NUM_TRIALS:
-    trial_num = st.session_state.trial_index + 1
-    st.markdown(f"### Trial {trial_num} of {NUM_TRIALS}")
+# Auto-refresh once per second for live countdown
+now_sec = int(time.time())
+if now_sec != st.session_state.last_tick_sec:
+    st.session_state.last_tick_sec = now_sec
+    st.rerun()
 
-    if trial_num <= TRAIN_AFTER:
-        st.markdown(f"⏳ <div class='timer'>Time left for training phase: {time_remaining} seconds</div>", unsafe_allow_html=True)
-        if time_remaining <= 0:
-            st.warning("⏰ Time's up! But you can still finish all 30 rounds.")
+# ── MAIN LOOP ───────────────────────────────────────────────────────────────────
+if st.session_state.idx < NUM_TRIALS:
+    trial_no = st.session_state.idx + 1
+    st.subheader(f"Trial {trial_no} / {NUM_TRIALS}")
 
-    if st.session_state.refresh_images:
-        st.session_state.current_images = get_trial_images()
-        st.session_state.refresh_images = False
+    # prepare images
+    if not st.session_state.images:
+        st.session_state.images = get_trial_images()
 
-    # ML Prediction
-    predicted_img, pred_score = None, None
-    if trial_num > TRAIN_AFTER and not st.session_state.model_trained:
-        st.session_state.model = train_model(st.session_state.choices)
-        st.session_state.model_trained = True
+    # if model not trained yet, train after 30 rounds
+    pred_img, pred_conf = None, None
+    if trial_no > TRAIN_AFTER:
+        if not st.session_state.model_ready:
+            st.session_state.model = train_model(st.session_state.choices)
+            st.session_state.model_ready = True
+        if st.session_state.model:
+            pred_img, pred_conf = predict_item(st.session_state.model, st.session_state.images)
 
-    if trial_num > TRAIN_AFTER and st.session_state.model:
-        predicted_img, pred_score = predict_choice(st.session_state.model, st.session_state.current_images)
-
-    # Display images
+    # render shelf row
+    chosen = None
     cols = st.columns(ITEMS_PER_TRIAL)
-    selected = None
-    for i, img in enumerate(st.session_state.current_images):
-        with cols[i]:
-            st.markdown(f"<div class='retail-card'>", unsafe_allow_html=True)
+    for i, (col, img) in enumerate(zip(cols, st.session_state.images)):
+        with col:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
             st.image(f"{IMAGE_FOLDER}/{img}", use_container_width=True)
-            if st.button("Choose", key=f"choose_{i}"):
-                selected = img
+            if st.button("Choose", key=f"btn_{trial_no}_{i}"):
+                chosen = img
             st.markdown("</div>", unsafe_allow_html=True)
 
-    if selected:
-        st.session_state.choices.append({
-            "trial": trial_num,
-            "options": st.session_state.current_images,
-            "selection": selected,
-            "predicted": predicted_img,
-            "response_time": elapsed,
-            "timestamp": datetime.utcnow().isoformat(),
-            "user_id": st.session_state.user_id
-        })
+    # record choice (or timeout with None)
+    if chosen or (st.session_state.idx < TRAIN_AFTER and time_left == 0):
+        record = dict(
+            trial       = trial_no,
+            options     = st.session_state.images,
+            selection   = chosen,
+            predicted   = pred_img,
+            response_ms = int((time.time() - st.session_state.timer_start) * 1000),
+            timestamp   = datetime.utcnow().isoformat(),
+            user_id     = st.session_state.uid,
+        )
+        st.session_state.choices.append(record)
 
-        st.session_state.last_result = (selected, predicted_img, pred_score)
-        st.session_state.trial_index += 1
-        st.session_state.refresh_images = True
+        # reset for next trial
+        st.session_state.idx    += 1
+        st.session_state.images  = []
         st.rerun()
 
-    # Show prediction ONLY after training phase
-    if trial_num > TRAIN_AFTER and st.session_state.last_result:
-        chosen, predicted, confidence = st.session_state.last_result
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("### You Chose:")
-            st.image(f"{IMAGE_FOLDER}/{chosen}", caption=chosen, use_container_width=True)
-        with col2:
-            st.markdown("### We Predicted:")
-            if predicted:
-                st.image(f"{IMAGE_FOLDER}/{predicted}", caption=f"{predicted} (Confidence: {confidence:.2f})", use_container_width=True)
-                st.markdown("<div class='neon-box'>", unsafe_allow_html=True)
-                chosen_index = extract_index(chosen or "0")
-                predicted_index = extract_index(predicted)
-                st.markdown("#### 🧠 Why the AI chose this:")
-                st.markdown("- It resembles items you picked before.")
-                st.markdown(f"- Its index ({predicted_index}) is close to your actual choice ({chosen_index}).")
-                if confidence > 0.5:
-                    st.markdown("- The AI was pretty confident.")
-                else:
-                    st.markdown("- The AI made its best guess.")
-                st.markdown("</div>", unsafe_allow_html=True)
+    # show prediction outcome **only after 30th round**
+    if st.session_state.idx >= TRAIN_AFTER and chosen and pred_img:
+        st.markdown("---")
+        st.markdown("### 🔍 Results of this round")
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown("**You chose:**")
+            st.image(f"{IMAGE_FOLDER}/{chosen}", use_container_width=True)
+        with colB:
+            st.markdown("**AI predicted:**")
+            st.image(f"{IMAGE_FOLDER}/{pred_img}", caption=f"Confidence {pred_conf:.2f}", use_container_width=True)
+            st.markdown(
+                "<div class='neon-box'>"
+                "<u>Why?</u><br>"
+                "• Most similar index to your past picks.<br>"
+                "• Learned preference from first 30 rounds."
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
+# ── END OF GAME ────────────────────────────────────────────────────────────────
 else:
-    st.success("✅ Simulation complete! Download your data below.")
+    st.success("Simulation complete! Download your data below.")
     df = pd.DataFrame(st.session_state.choices)
-    df["correct_prediction"] = df["selection"] == df["predicted"]
-    filename = f"{OUTPUT_DIR}/results_{st.session_state.user_id}.csv"
-    df.to_csv(filename, index=False)
+    df["correct"] = df["selection"] == df["predicted"]
+    fname = f"{OUTPUT_DIR}/results_{st.session_state.uid}.csv"
+    df.to_csv(fname, index=False)
     st.dataframe(df)
-    st.download_button("Download CSV", data=df.to_csv(index=False), file_name="your_choices.csv", mime="text/csv")
+    st.download_button("📥 Download CSV", df.to_csv(index=False), file_name="choices.csv", mime="text/csv")
