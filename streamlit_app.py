@@ -89,7 +89,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<div class='title-text'>💾 Grocery Shelf Smart Selector</div>", unsafe_allow_html=True)
+st.markdown("<div class='title-text'>💾 Smart Shopping 💾 </div>", unsafe_allow_html=True)
 st.write("")
 
 # ---------- LAST RESULT ----------
