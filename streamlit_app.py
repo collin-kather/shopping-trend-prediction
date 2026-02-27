@@ -5,7 +5,7 @@ import random
 from sklearn.ensemble import RandomForestClassifier
 import uuid
 
-# MUST BE FIRST STREAMLIT COMMAND
+# MUST BE FIRST STREAMLIT CALL
 st.set_page_config(layout="wide")
 
 # ---------- CONFIG ----------
@@ -20,11 +20,13 @@ ITEMS_PER_TRIAL = 5
 def load_features():
     df = pd.read_csv(CSV_FEATURES)
     df = df[df["image"].notna()]
+
     df["index"] = df["image"].apply(
         lambda x: int(os.path.splitext(str(x))[0])
         if str(x).endswith(".jpg") and str(x)[:-4].isdigit()
         else None
     )
+
     df = df.dropna(subset=["index"])
     df["index"] = df["index"].astype(int)
     return df
@@ -40,22 +42,32 @@ if "trial_index" not in st.session_state:
     st.session_state.refresh_images = True
     st.session_state.last_result = None
     st.session_state.user_id = str(uuid.uuid4())[:8]
+    st.session_state.current_images = []
 
 # ---------- UTILS ----------
 def get_all_images():
-    return sorted([f for f in os.listdir(IMAGE_FOLDER) if f.endswith(".jpg")])
+    if not os.path.exists(IMAGE_FOLDER):
+        return []
+    return sorted([
+        f for f in os.listdir(IMAGE_FOLDER)
+        if f.lower().endswith(".jpg")
+    ])
 
 def get_trial_images():
     all_images = get_all_images()
+    if len(all_images) < ITEMS_PER_TRIAL:
+        return all_images
     return random.sample(all_images, ITEMS_PER_TRIAL)
 
 def train_model(data):
     records = []
+
     for trial in data:
         for opt in trial["options"]:
             feat = feature_df[feature_df["image"] == opt]
             if feat.empty:
                 continue
+
             row = feat.iloc[0].to_dict()
             row["chosen"] = int(opt == trial["selection"])
             records.append(row)
@@ -65,10 +77,10 @@ def train_model(data):
 
     df = pd.DataFrame(records)
 
-    if df["chosen"].sum() == 0:
+    if "chosen" not in df or df["chosen"].sum() == 0:
         return None
 
-    X = df.drop(columns=["image", "chosen", "index"])
+    X = df.drop(columns=["image", "chosen", "index"], errors="ignore")
     y = df["chosen"]
 
     model = RandomForestClassifier(n_estimators=100, random_state=42)
@@ -77,10 +89,11 @@ def train_model(data):
 
 def predict_choice(model, options):
     df_opts = feature_df[feature_df["image"].isin(options)]
+
     if df_opts.empty:
         return None, 0.0
 
-    X = df_opts.drop(columns=["image", "index"])
+    X = df_opts.drop(columns=["image", "index"], errors="ignore")
     preds = model.predict_proba(X)[:, 1]
     best_idx = preds.argmax()
 
@@ -110,12 +123,17 @@ if st.session_state.last_result and st.session_state.trial_index >= TRAIN_AFTER:
 
     with col1:
         st.markdown("#### 🛍️ You Chose")
-        st.image(f"{IMAGE_FOLDER}/{st.session_state.last_result['chosen']}", width=200)
+        chosen_path = os.path.join(IMAGE_FOLDER, st.session_state.last_result["chosen"])
+        if os.path.exists(chosen_path):
+            st.image(chosen_path, width=200)
 
     with col2:
         st.markdown("#### 🤖 We Predicted")
-        if st.session_state.last_result['predicted']:
-            st.image(f"{IMAGE_FOLDER}/{st.session_state.last_result['predicted']}", width=200)
+        predicted = st.session_state.last_result["predicted"]
+        if predicted:
+            pred_path = os.path.join(IMAGE_FOLDER, predicted)
+            if os.path.exists(pred_path):
+                st.image(pred_path, width=200)
 
         st.markdown(
             f"**Confidence:** `{st.session_state.last_result['confidence']:.2f}`"
@@ -152,7 +170,9 @@ if st.session_state.trial_index < NUM_TRIALS:
 
     for i, img in enumerate(st.session_state.current_images):
         with cols[i]:
-            st.image(f"{IMAGE_FOLDER}/{img}", use_container_width=True)
+            img_path = os.path.join(IMAGE_FOLDER, img)
+            if os.path.exists(img_path):
+                st.image(img_path)
             if st.button("Choose", key=f"choose_{i}"):
                 selected = img
 
